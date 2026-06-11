@@ -102,6 +102,39 @@ def check_columns(conn, db, table, columns, internal=()):
         )
 
 
+def prune_missing(conn, rpt_ids, max_fraction=0.1):
+    """Delete rows — from every table that has an rptId column — whose
+    rptId is NOT in `rpt_ids`.
+
+    For reconciliation runs whose batch is a complete crawl: anything
+    the crawl didn't return has been removed upstream. Refuses to act
+    when it would delete more than `max_fraction` of the filing table,
+    so a partial crawl can't mass-delete.
+    """
+    total = conn.execute("SELECT count(*) FROM filing").fetchone()[0]
+    placeholders = ", ".join("?" * len(rpt_ids))
+    args = sorted(rpt_ids)
+    doomed = conn.execute(
+        f"SELECT count(*) FROM filing WHERE rptId NOT IN ({placeholders})", args
+    ).fetchone()[0]
+    if total and doomed / total > max_fraction:
+        raise SystemExit(
+            f"prune: refusing to delete {doomed} of {total} filings"
+            f" (> {max_fraction:.0%}); the batch looks like a partial crawl"
+        )
+    reports = []
+    for table in tables_with_rptid(conn):
+        cursor = conn.execute(
+            f"DELETE FROM {quoted(table)} WHERE rptId NOT IN ({placeholders})",
+            args,
+        )
+        if cursor.rowcount:
+            reports.append(
+                f"prune: removed {cursor.rowcount} {table} rows gone upstream"
+            )
+    return reports
+
+
 def load_tables(
     conn,
     db,

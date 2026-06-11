@@ -139,3 +139,21 @@ def test_primitives(db):
         conn, "widget", ["rptId", "name"], [{"rptId": 2, "name": "z"}]
     )
     assert (deleted, inserted) == (1, 1)
+
+
+def test_prune_missing_deletes_gone_rows_with_guard(db):
+    import sqlite3 as s
+
+    from olms.merge import prune_missing
+
+    conn = s.connect(db)
+    conn.execute("CREATE TABLE filing (rptId INTEGER PRIMARY KEY)")
+    conn.executemany("INSERT INTO filing VALUES (?)", [(i,) for i in range(10)])
+
+    # widget rows for rptIds 1 and 2 exist from the fixture
+    reports = prune_missing(conn, set(range(1, 10)))  # 0 is gone upstream
+    assert any("1 filing rows" in r for r in reports)
+    assert conn.execute("SELECT count(*) FROM filing").fetchone() == (9,)
+
+    with pytest.raises(SystemExit, match="partial crawl"):
+        prune_missing(conn, {1, 2})  # would delete 7 of 9
