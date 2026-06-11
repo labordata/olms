@@ -113,3 +113,21 @@ def test_config_defaults():
     )
     assert config.scan_concurrency == 4
     assert config.user_agent.startswith("Mozilla/5.0")
+
+
+def test_fetch_hit_html_falls_through_mismatched_forms():
+    # OLMS only server-renders a filing's data when rptForm matches its
+    # actual type; a mismatch returns the bare Angular shell with no
+    # "Signature" (verified live: an electronic LM-21 under LM20Form is
+    # the ~8.5K shell, under LM21Form the ~21K rendered form). The scan
+    # must therefore fall through to the next configured form.
+    from olms.discover import fetch_hit_html
+
+    session = Mock()
+    session.get.side_effect = [
+        response(body=b'<html ng-app="LM20App">bare shell</html>'),
+        response(body=b"<html>Signature ... rendered LM-21 ...</html>"),
+    ]
+    body = fetch_hit_html(session, 941283, ("LM20Form", "LM21Form"))
+    assert b"rendered LM-21" in body
+    assert session.get.call_count == 2
