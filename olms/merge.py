@@ -67,9 +67,79 @@ def insert_rows(conn, table, columns, rows, replace=False):
     placeholders = ", ".join("?" * len(columns))
     conn.executemany(
         f"{verb} INTO {quoted(table)} ({column_list}) VALUES ({placeholders})",
-        [tuple(row[column] for column in columns) for row in rows],
+        [tuple(row.get(column) for column in columns) for row in rows],
     )
     return len(rows)
+
+
+def columns_of(rows):
+    """Union of row keys, first-seen order."""
+    columns = {}
+    for row in rows:
+        for column in row:
+            columns.setdefault(column)
+    return list(columns)
+
+
+def normalize_rows(rows):
+    # empty strings become NULL, matching both the csvs-to-sqlite full
+    # builds (pandas NaN) and the CSV merge path
+    return [
+        {column: (None if value == "" else value) for column, value in row.items()}
+        for row in rows
+    ]
+
+
+def check_columns(conn, db, table, columns, internal=()):
+    table_cols = table_columns(conn, table)
+    if not table_cols:
+        raise SystemExit(f"{db} has no table {table}")
+    unknown = sorted(set(columns) - set(table_cols) - set(internal))
+    if unknown:
+        raise SystemExit(
+            f"{table}: columns {unknown} are not in the table;"
+            " drop them in the flatten spec or pass --ignore"
+        )
+
+
+def load_tables(
+    conn,
+    db,
+    tables,
+    order,
+    strategies=None,
+    empty_row_check=None,
+    internal_columns=None,
+):
+    """Merge several flattened tables — one source document — in ONE
+    transaction, so a failure can't leave the database mid-cascade."""
+    strategies = strategies or {}
+    empty_row_check = empty_row_check or {}
+    internal_columns = internal_columns or {}
+    reports = []
+    with conn:
+        for table in order:
+            rows = normalize_rows(tables.get(table, []))
+            if table in empty_row_check:
+                check = empty_row_check[table]
+                kept = [r for r in rows if any(r.get(c) for c in check)]
+                if len(kept) < len(rows):
+                    reports.append(
+                        f"{table}: skipped {len(rows) - len(kept)} empty rows"
+                    )
+                rows = kept
+            if not rows:
+                reports.append(f"{table}: no rows to merge")
+                continue
+            columns = columns_of(rows)
+            check_columns(
+                conn, db, table, columns, internal_columns.get(table, ())
+            )
+            deleted, inserted = merge(
+                conn, table, columns, rows, strategy=strategies.get(table)
+            )
+            reports.append(f"{table}: -{deleted} +{inserted} rows")
+    return reports
 
 
 def merge(conn, table, columns, rows, replace=False, strategy=None):
