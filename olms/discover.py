@@ -44,7 +44,10 @@ class DiscoveryConfig:
     scan_forms: tuple
     # i-label texts whose following i-value holds the filer's srNum,
     # tried in order (e.g. "1.a. File Number: C-")
-    sr_num_labels: tuple
+    sr_num_labels: tuple = ()
+    # markup dialects without i-label/i-value (e.g. LM-30's
+    # rpt-instruction/rpt-data) supply their own html-bytes -> int
+    extractor: object = None
     description: str = ""
     scan_concurrency: int = 4
     user_agent: str = USER_AGENT
@@ -166,13 +169,11 @@ def watermark(db_path, watermark_sql):
     return row[0] or 0
 
 
-def main(config):
-    ap = argparse.ArgumentParser(description=config.description or __doc__)
-    ap.add_argument("db", help="database holding the max known rptId")
-    args = ap.parse_args()
-
+def discover(config, db):
+    """Run the watermark/canary/bisect/scan sequence; return the set of
+    srNums with new filings."""
     sess = _session(config.user_agent)
-    max_known = watermark(args.db, config.watermark_sql)
+    max_known = watermark(db, config.watermark_sql)
     print(f"# max known rptId: {max_known}", file=sys.stderr)
 
     # Canary: max_known is assigned by definition (it's in our DB), so
@@ -180,7 +181,7 @@ def main(config):
     # an empty scan would mean "discovery is blind", not "nothing new".
     if max_known and not is_assigned(sess, max_known):
         raise RuntimeError(
-            f"rptId {max_known} is in {args.db} but the OLMS probe reports"
+            f"rptId {max_known} is in {db} but the OLMS probe reports"
             " it unassigned; the ng-app/content-type heuristics are broken"
         )
 
@@ -193,12 +194,15 @@ def main(config):
     )
 
     sr_nums = set()
+    extractor = config.extractor or (
+        lambda body: extract_sr_num(body, config.sr_num_labels)
+    )
 
     def scan_one(rpt_id):
         body = fetch_hit_html(sess, rpt_id, config.scan_forms)
         if body is None:
             return None
-        return extract_sr_num(body, config.sr_num_labels)
+        return extractor(body)
 
     with ThreadPoolExecutor(max_workers=config.scan_concurrency) as ex:
         for sr in ex.map(scan_one, window):
@@ -210,5 +214,13 @@ def main(config):
         f"window {max_known + 1}..{max_assigned}",
         file=sys.stderr,
     )
-    for sr in sorted(sr_nums):
+    return sr_nums
+
+
+def main(config):
+    ap = argparse.ArgumentParser(description=config.description or __doc__)
+    ap.add_argument("db", help="database holding the max known rptId")
+    args = ap.parse_args()
+
+    for sr in sorted(discover(config, args.db)):
         print(sr)
