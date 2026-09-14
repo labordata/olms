@@ -34,6 +34,18 @@ REPORT_URL = "https://olmsapps.dol.gov/query/orgReport.do?rptId={}&rptForm={}"
 PROBE_FORMS = ("LM2Form", "LM10Form", "LM20Form", "LM30Form", "S1Form")
 BLOCK_CODES = (403, 429)
 
+# OLMS has been observed to un-assign rptIds after they're
+# published (reports get pulled), which trips olms.discover's canary
+# check and requires manually deleting the row to
+# unblock scrapes. If the DB's max rptId is unassigned, walk backward a 
+# bounded number of ids looking # for one that IS assigned. Finding 
+# one confirms the probe heuristics still work and the original id 
+# was simply pulled; the scan window then starts just above the DB's 
+# max, so we intentionally never re-scan the pulled ids (they're gone, 
+# not "new"). If nothing nearby is assigned, we still raise: that's 
+# the "heuristics are broken" case the canary exists to catch.
+MAX_BACKWARD_PROBES = 25
+
 
 @dataclass
 class DiscoveryConfig:
@@ -167,6 +179,16 @@ def watermark(db_path, watermark_sql):
     return row[0] or 0
 
 
+def find_canary(sess, max_known):
+    for rpt_id in range(max_known, max_known - MAX_BACKWARD_PROBES, -1):
+        if rpt_id <= 0:
+            break
+        if is_assigned(sess, rpt_id):
+            print(f"# max assigned rptId: {rpt_id}", file=sys.stderr)
+            return rpt_id
+    return None
+
+
 def discover(config, db):
     """Run the watermark/canary/bisect/scan sequence; return the set of
     srNums with new filings."""
@@ -174,13 +196,11 @@ def discover(config, db):
     max_known = watermark(db, config.watermark_sql)
     print(f"# max known rptId: {max_known}", file=sys.stderr)
 
-    # Canary: max_known is assigned by definition (it's in our DB), so
-    # if the probe can't see it, the markup heuristics have broken and
-    # an empty scan would mean "discovery is blind", not "nothing new".
-    if max_known and not is_assigned(sess, max_known):
+    if max_known and find_canary(sess, max_known) is None:
         raise RuntimeError(
-            f"rptId {max_known} is in {db} but the OLMS probe reports"
-            " it unassigned; the error label/content-type heuristics are broken"
+            f"rptId {max_known} and the {MAX_BACKWARD_PROBES} ids below it"
+            f" are all unassigned in {db}; the error page/content-type"
+            " heuristics are broken"
         )
 
     max_assigned = bisect_max_assigned(sess, max_known)
