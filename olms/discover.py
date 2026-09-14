@@ -96,16 +96,14 @@ def fetch(session, rpt_id, form):
 
 def fetch_assigned(session, rpt_id, form):
     """True if `rpt_id` is assigned to `form`.
-
-    Real form pages embed an Angular app (`ng-app="LM20App"` etc.) and
-    fetch their data asynchronously. The OLMS "not found" page is a
-    plain HTML stub without ng-app. Body size is unreliable as a
-    discriminator (form templates are ~8.5K, the stub is ~8.2K).
+    
+    Body size is unreliable as a discriminator (form templates are ~8.5K, 
+    the stub is ~8.2K). Error pages are labeled as such.
     """
     content_type, body = fetch(session, rpt_id, form)
     if content_type == "application/pdf":
         return True
-    return content_type == "text/html" and b"ng-app=" in body
+    return content_type == "text/html" and b"Error Page" not in body
 
 
 def is_assigned(session, rpt_id):
@@ -182,7 +180,7 @@ def discover(config, db):
     if max_known and not is_assigned(sess, max_known):
         raise RuntimeError(
             f"rptId {max_known} is in {db} but the OLMS probe reports"
-            " it unassigned; the ng-app/content-type heuristics are broken"
+            " it unassigned; the error label/content-type heuristics are broken"
         )
 
     max_assigned = bisect_max_assigned(sess, max_known)
