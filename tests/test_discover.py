@@ -15,7 +15,7 @@ from olms.discover import (
 )
 
 
-def response(status=200, content_type="text/html", body=b"ng-app="):
+def response(status=200, content_type="text/html", body=b"success body"):
     r = Mock()
     r.status_code = status
     r.headers = {"Content-Type": content_type}
@@ -31,7 +31,7 @@ def test_fetch_backs_off_then_succeeds():
     with patch.object(discover.time, "sleep") as sleep:
         content_type, body = fetch(session, 1, "LM10Form")
     assert content_type == "text/html"
-    assert body == b"ng-app="
+    assert body == b"success body"
     assert [c.args[0] for c in sleep.call_args_list] == [5, 10]
 
 
@@ -55,8 +55,8 @@ def test_fetch_assigned():
     session = Mock()
     session.get.side_effect = [
         response(content_type="application/pdf"),
-        response(body=b"<html>not found stub</html>"),
-        response(body=b'<html ng-app="LM20App">'),
+        response(body=b"Error Page"),
+        response(),
     ]
     assert fetch_assigned(session, 1, "LM2Form") is True
     assert fetch_assigned(session, 2, "LM2Form") is False
@@ -125,7 +125,7 @@ def test_fetch_hit_html_falls_through_mismatched_forms():
 
     session = Mock()
     session.get.side_effect = [
-        response(body=b'<html ng-app="LM20App">bare shell</html>'),
+        response(body=b'<html>bare shell</html>'),
         response(body=b"<html>Signature ... rendered LM-21 ...</html>"),
     ]
     body = fetch_hit_html(session, 941283, ("LM20Form", "LM21Form"))
