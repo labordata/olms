@@ -3,6 +3,7 @@ from unittest.mock import Mock
 from scrapy import Spider
 from scrapy.http import Request, Response
 from scrapy.settings import Settings
+from twisted.internet.defer import Deferred
 
 from olms.middleware import BlockingBackoffMiddleware, StickyBadNodeRetryMiddleware
 
@@ -117,22 +118,31 @@ def bad_node_response(request, body=BAD_NODE_BODY):
 
 def make_sticky_middleware():
     crawler = Mock(spider=make_spider())
-    return StickyBadNodeRetryMiddleware(crawler), crawler
+    calls = []
+
+    def fake_call_later(delay, callback):
+        calls.append(delay)
+        callback()  # fire synchronously so tests don't need a reactor
+
+    return StickyBadNodeRetryMiddleware(crawler, call_later=fake_call_later), crawler, calls
 
 
-def test_bad_node_404_retries_on_a_fresh_connection():
-    mw, crawler = make_sticky_middleware()
+def test_bad_node_404_retries_on_a_fresh_connection_after_a_delay():
+    mw, crawler, calls = make_sticky_middleware()
     request = Request("https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet")
 
-    retry = mw.process_response(request, bad_node_response(request), crawler.spider)
+    deferred = mw.process_response(request, bad_node_response(request), crawler.spider)
 
+    assert isinstance(deferred, Deferred)
+    retry = deferred.result
     assert isinstance(retry, Request)
     assert retry.headers[b"Connection"] == b"close"
     assert retry.meta["retry_times"] == 1
+    assert calls == [mw.RETRY_DELAY]
 
 
 def test_ordinary_404_is_left_alone():
-    mw, crawler = make_sticky_middleware()
+    mw, crawler, calls = make_sticky_middleware()
     request = Request("https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet")
 
     out = mw.process_response(
@@ -140,10 +150,11 @@ def test_ordinary_404_is_left_alone():
     )
 
     assert isinstance(out, Response)
+    assert calls == []
 
 
 def test_success_is_left_alone():
-    mw, crawler = make_sticky_middleware()
+    mw, crawler, calls = make_sticky_middleware()
     request = Request("https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet")
 
     out = mw.process_response(
@@ -151,10 +162,11 @@ def test_success_is_left_alone():
     )
 
     assert isinstance(out, Response)
+    assert calls == []
 
 
 def test_bad_node_retries_exhaust_and_pass_through():
-    mw, crawler = make_sticky_middleware()
+    mw, crawler, calls = make_sticky_middleware()
     request = Request(
         "https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet",
         meta={"retry_times": mw.MAX_RETRIES},
@@ -163,12 +175,28 @@ def test_bad_node_retries_exhaust_and_pass_through():
     out = mw.process_response(request, bad_node_response(request), crawler.spider)
 
     assert isinstance(out, Response)
+    assert calls == []
 
 
 def test_spider_argument_optional_for_sticky_middleware():
-    mw, crawler = make_sticky_middleware()
+    mw, crawler, _ = make_sticky_middleware()
     request = Request("https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet")
 
-    retry = mw.process_response(request, bad_node_response(request))
+    deferred = mw.process_response(request, bad_node_response(request))
 
-    assert isinstance(retry, Request)
+    assert isinstance(deferred.result, Request)
+
+
+def test_retries_are_spaced_out_not_fired_back_to_back():
+    # The same two srNums exhausted all 4 retries, back to back in
+    # under 10 seconds, across several separate pipeline runs — far
+    # more consistently than independent coin flips would predict.
+    # Spacing retries out gives the load balancer's node choice a
+    # chance to actually be independent each time.
+    mw, crawler, calls = make_sticky_middleware()
+    request = Request("https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet")
+
+    mw.process_response(request, bad_node_response(request), crawler.spider)
+
+    assert calls == [StickyBadNodeRetryMiddleware.RETRY_DELAY]
+    assert StickyBadNodeRetryMiddleware.RETRY_DELAY > 0

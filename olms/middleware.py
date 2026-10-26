@@ -14,6 +14,7 @@ against the rate limiter.
 import logging
 
 from scrapy.downloadermiddlewares.retry import get_retry_request
+from twisted.internet.defer import Deferred
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +47,33 @@ class StickyBadNodeRetryMiddleware:
     fail — no client-side fix can route around that — but at least it
     fails fast with the real cause in the log, instead of being read as
     a sustained block.
+
+    Retries are spaced out by RETRY_DELAY rather than fired back to
+    back: the same two srNums exhausted all 4 retries, back to back in
+    under 10 seconds, across several separate pipeline runs — far more
+    consistently than independent ~50% coin flips would predict.
+    Manually probing those same srNums with a couple of real seconds
+    between each fresh connection found them succeeding at a normal
+    rate, like any other srNum. The likely explanation is that the load
+    balancer's node choice isn't fully independent of request timing
+    (e.g. tied to source port or a short rotation window), so a tight
+    burst of retries can end up correlated onto the same bad node in a
+    way that naturally-spaced requests aren't.
     """
 
     SIGNATURE = b"has not been defined"
     MAX_RETRIES = 4
+    RETRY_DELAY = 2.0
 
-    def __init__(self, crawler):
+    def __init__(self, crawler, call_later=None):
         self.crawler = crawler
+        self._call_later = call_later or self._reactor_call_later
+
+    @staticmethod
+    def _reactor_call_later(delay, callback):
+        from twisted.internet import reactor
+
+        reactor.callLater(delay, callback)
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -84,12 +105,15 @@ class StickyBadNodeRetryMiddleware:
 
         logger.warning(
             "HTTP 404 from %s (body=%r) looks like a bad backend node, "
-            "not a real not-found; retrying on a fresh connection",
+            "not a real not-found; retrying on a fresh connection in %.0fs",
             request.url,
             request.body,
+            self.RETRY_DELAY,
         )
         retry.headers["Connection"] = "close"
-        return retry
+        deferred = Deferred()
+        self._call_later(self.RETRY_DELAY, lambda: deferred.callback(retry))
+        return deferred
 
 
 class BlockingBackoffMiddleware:
