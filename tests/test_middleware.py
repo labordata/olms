@@ -73,6 +73,43 @@ def test_success_resets_consecutive_counter():
     assert mw.consecutive_blocks == 0
 
 
+def test_success_eases_off_the_backoff_delay():
+    mw, _, slot = make_middleware()
+    spider = make_spider()
+    request = Request("https://olmsapps.dol.gov/x", meta={"download_slot": "k"})
+
+    mw.process_response(request, blocked_response(request), spider)
+    assert slot.delay == 5.0
+    mw.process_response(request, blocked_response(request), spider)
+    assert slot.delay == 10.0
+
+    mw.process_response(request, Response(request.url, status=200, request=request), spider)
+    assert slot.delay == 5.0
+
+
+def test_easing_off_never_drops_below_initial_backoff():
+    mw, _, slot = make_middleware(slot_delay=0.5)
+    spider = make_spider()
+    request = Request("https://olmsapps.dol.gov/x", meta={"download_slot": "k"})
+
+    mw.process_response(request, Response(request.url, status=200, request=request), spider)
+
+    assert slot.delay == 0.5  # left alone: never raised above INITIAL_BACKOFF to begin with
+
+
+def test_scattered_one_off_blocks_dont_ratchet_delay_up_forever():
+    mw, _, slot = make_middleware()
+    spider = make_spider()
+    request = Request("https://olmsapps.dol.gov/x", meta={"download_slot": "k"})
+    success = Response(request.url, status=200, request=request)
+
+    for _ in range(10):
+        mw.process_response(request, blocked_response(request), spider)
+        mw.process_response(request, success, spider)
+
+    assert slot.delay == 5.0  # stays at the floor instead of climbing toward MAX_BACKOFF
+
+
 def test_persistent_blocking_closes_spider_once():
     mw, crawler, _ = make_middleware()
     spider = make_spider()

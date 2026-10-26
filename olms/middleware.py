@@ -22,6 +22,11 @@ ROBOTSTXT_OBEY request per domain, and OLMS genuinely has no
 robots.txt there — that 404 is normal (scrapy's own robots.txt
 middleware already treats a missing robots.txt as "no restrictions")
 and is excluded here so it isn't mistaken for a block.
+
+The backoff delay only ever climbs on a block; it also eases back down
+on success, so a sustained run of blocks still slows the crawl a lot,
+but scattered one-off blocks amid an otherwise-successful crawl don't
+permanently ratchet the delay toward MAX_BACKOFF.
 """
 
 import logging
@@ -60,6 +65,7 @@ class BlockingBackoffMiddleware:
             "/robots.txt"
         ):
             self.consecutive_blocks = 0
+            self._ease_off(request)
             return response
 
         self.consecutive_blocks += 1
@@ -102,3 +108,15 @@ class BlockingBackoffMiddleware:
                 new_delay,
             )
             slot.delay = new_delay
+
+    def _ease_off(self, request):
+        # Without this, a scattered one-off block amid an otherwise
+        # successful crawl permanently ratchets the slot delay toward
+        # MAX_BACKOFF, since _back_off only ever raises it. Halve it
+        # back down on success instead, so only a sustained run of
+        # blocks (not occasional, isolated ones) keeps the delay high.
+        key = request.meta.get("download_slot")
+        slot = self.crawler.engine.downloader.slots.get(key) if key else None
+        if slot is None or slot.delay <= self.INITIAL_BACKOFF:
+            return
+        slot.delay = max(slot.delay / 2, self.INITIAL_BACKOFF)
