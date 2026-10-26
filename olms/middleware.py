@@ -9,6 +9,13 @@ quietly merging partial data.
 403 should NOT also be in RETRY_HTTP_CODES: the stock RetryMiddleware
 retries immediately with no backoff, which just re-spends the request
 against the rate limiter.
+
+Some servlets also disguise blocking as a 404 (a genuine not-found from
+them is a 200 with an empty body/result) rather than the usual 403/429
+— unlike other servlets, where a 404 is a real, consistently-reproducible
+routing error that backing off won't fix. BLOCK_CODES is therefore
+configurable per spider via the BLOCKING_BACKOFF_CODES setting rather
+than hardcoded for every spider using this middleware.
 """
 
 import logging
@@ -25,21 +32,25 @@ class BlockingBackoffMiddleware:
     INITIAL_BACKOFF = 5.0
     MAX_BACKOFF = 300.0
 
-    def __init__(self, crawler):
+    def __init__(self, crawler, block_codes=None):
         self.crawler = crawler
+        self.block_codes = tuple(block_codes) if block_codes else self.BLOCK_CODES
         self.consecutive_blocks = 0
         self.closing = False
 
     @classmethod
     def from_crawler(cls, crawler):
-        return cls(crawler)
+        block_codes = crawler.settings.getlist(
+            "BLOCKING_BACKOFF_CODES", cls.BLOCK_CODES
+        )
+        return cls(crawler, block_codes=block_codes)
 
     def process_response(self, request, response, spider=None):
         # scrapy >= 2.16 deprecates the spider argument
         if spider is None:
             spider = self.crawler.spider
 
-        if response.status not in self.BLOCK_CODES:
+        if response.status not in self.block_codes:
             self.consecutive_blocks = 0
             return response
 

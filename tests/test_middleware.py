@@ -103,3 +103,39 @@ def test_429_also_treated_as_block():
 
     assert isinstance(retry, Request)
     assert slot.delay == 5.0
+
+
+def test_block_codes_default_from_crawler():
+    crawler = Mock(settings=Settings())
+    mw = BlockingBackoffMiddleware.from_crawler(crawler)
+
+    assert mw.block_codes == BlockingBackoffMiddleware.BLOCK_CODES
+
+
+def test_block_codes_configurable_via_settings():
+    crawler = Mock(settings=Settings({"BLOCKING_BACKOFF_CODES": [403, 404, 429]}))
+    mw = BlockingBackoffMiddleware.from_crawler(crawler)
+
+    assert mw.block_codes == (403, 404, 429)
+
+
+def test_404_not_blocked_by_default():
+    mw, _, _ = make_middleware()
+    request = Request("https://olmsapps.dol.gov/x", meta={"download_slot": "k"})
+
+    out = mw.process_response(request, blocked_response(request, status=404), make_spider())
+
+    assert isinstance(out, Response)
+
+
+def test_404_blocked_when_configured():
+    crawler = Mock()
+    slot = Mock(delay=0.5)
+    crawler.engine.downloader.slots.get.return_value = slot
+    mw = BlockingBackoffMiddleware(crawler, block_codes=(403, 404, 429))
+    request = Request("https://olmsapps.dol.gov/x", meta={"download_slot": "k"})
+
+    retry = mw.process_response(request, blocked_response(request, status=404), make_spider())
+
+    assert isinstance(retry, Request)
+    assert slot.delay == 5.0
