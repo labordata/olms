@@ -101,10 +101,13 @@ class BlockingBackoffMiddleware:
             return
         new_delay = min(max(slot.delay * 2, self.INITIAL_BACKOFF), self.MAX_BACKOFF)
         if new_delay > slot.delay:
+            body = request.body.decode("utf-8", errors="replace") if request.body else ""
             logger.warning(
-                "HTTP %s from %s; backing off download slot to %.0fs",
+                "HTTP %s from %s (retry %d, body=%r); backing off download slot to %.0fs",
                 response.status,
                 request.url,
+                request.meta.get("retry_times", 0),
+                body,
                 new_delay,
             )
             slot.delay = new_delay
