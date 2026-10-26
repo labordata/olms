@@ -139,3 +139,16 @@ def test_404_blocked_when_configured():
 
     assert isinstance(retry, Request)
     assert slot.delay == 5.0
+
+
+def test_robots_txt_404_never_treated_as_block():
+    crawler = Mock()
+    slot = Mock(delay=0.5)
+    crawler.engine.downloader.slots.get.return_value = slot
+    mw = BlockingBackoffMiddleware(crawler, block_codes=(403, 404, 429))
+    request = Request("https://olmsapps.dol.gov/robots.txt")
+
+    out = mw.process_response(request, blocked_response(request, status=404), make_spider())
+
+    assert isinstance(out, Response)
+    assert slot.delay == 0.5  # unchanged

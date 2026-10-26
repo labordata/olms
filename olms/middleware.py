@@ -16,6 +16,12 @@ them is a 200 with an empty body/result) rather than the usual 403/429
 routing error that backing off won't fix. BLOCK_CODES is therefore
 configurable per spider via the BLOCKING_BACKOFF_CODES setting rather
 than hardcoded for every spider using this middleware.
+
+A spider that opts into treating 404 as blocking still makes one
+ROBOTSTXT_OBEY request per domain, and OLMS genuinely has no
+robots.txt there — that 404 is normal (scrapy's own robots.txt
+middleware already treats a missing robots.txt as "no restrictions")
+and is excluded here so it isn't mistaken for a block.
 """
 
 import logging
@@ -50,7 +56,9 @@ class BlockingBackoffMiddleware:
         if spider is None:
             spider = self.crawler.spider
 
-        if response.status not in self.block_codes:
+        if response.status not in self.block_codes or request.url.endswith(
+            "/robots.txt"
+        ):
             self.consecutive_blocks = 0
             return response
 
