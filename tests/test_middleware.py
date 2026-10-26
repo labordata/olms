@@ -4,7 +4,7 @@ from scrapy import Spider
 from scrapy.http import Request, Response
 from scrapy.settings import Settings
 
-from olms.middleware import BlockingBackoffMiddleware
+from olms.middleware import BlockingBackoffMiddleware, StickyBadNodeRetryMiddleware
 
 
 def make_spider():
@@ -103,3 +103,72 @@ def test_429_also_treated_as_block():
 
     assert isinstance(retry, Request)
     assert slot.delay == 5.0
+
+
+BAD_NODE_BODY = (
+    b"<H1>SRVE0255E: A WebGroup/Virtual Host to handle "
+    b"/olpdr/GetLM2021FilerDetailServlet has not been defined.</H1>"
+)
+
+
+def bad_node_response(request, body=BAD_NODE_BODY):
+    return Response(request.url, status=404, body=body, request=request)
+
+
+def make_sticky_middleware():
+    crawler = Mock(spider=make_spider())
+    return StickyBadNodeRetryMiddleware(crawler), crawler
+
+
+def test_bad_node_404_retries_on_a_fresh_connection():
+    mw, crawler = make_sticky_middleware()
+    request = Request("https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet")
+
+    retry = mw.process_response(request, bad_node_response(request), crawler.spider)
+
+    assert isinstance(retry, Request)
+    assert retry.headers[b"Connection"] == b"close"
+    assert retry.meta["retry_times"] == 1
+
+
+def test_ordinary_404_is_left_alone():
+    mw, crawler = make_sticky_middleware()
+    request = Request("https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet")
+
+    out = mw.process_response(
+        request, Response(request.url, status=404, request=request), crawler.spider
+    )
+
+    assert isinstance(out, Response)
+
+
+def test_success_is_left_alone():
+    mw, crawler = make_sticky_middleware()
+    request = Request("https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet")
+
+    out = mw.process_response(
+        request, Response(request.url, status=200, request=request), crawler.spider
+    )
+
+    assert isinstance(out, Response)
+
+
+def test_bad_node_retries_exhaust_and_pass_through():
+    mw, crawler = make_sticky_middleware()
+    request = Request(
+        "https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet",
+        meta={"retry_times": mw.MAX_RETRIES},
+    )
+
+    out = mw.process_response(request, bad_node_response(request), crawler.spider)
+
+    assert isinstance(out, Response)
+
+
+def test_spider_argument_optional_for_sticky_middleware():
+    mw, crawler = make_sticky_middleware()
+    request = Request("https://olmsapps.dol.gov/olpdr/GetLM2021FilerDetailServlet")
+
+    retry = mw.process_response(request, bad_node_response(request))
+
+    assert isinstance(retry, Request)
