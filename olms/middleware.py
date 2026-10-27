@@ -14,8 +14,106 @@ against the rate limiter.
 import logging
 
 from scrapy.downloadermiddlewares.retry import get_retry_request
+from twisted.internet.defer import Deferred
 
 logger = logging.getLogger(__name__)
+
+
+class StickyBadNodeRetryMiddleware:
+    """olmsapps.dol.gov sits behind a load balancer whose backend nodes
+    don't all have every olpdr servlet's virtual host deployed. Which
+    node a connection lands on is decided once, when the TCP connection
+    is opened — not per request — and stays fixed for that connection's
+    whole lifetime: confirmed by reusing one connection for 8+ requests
+    after it first 404'd, and it 404'd every single time. A fresh
+    connection gets an independent new chance at a working node (also
+    confirmed: a known-good srNum flipped 200/404 across separate
+    connections with no pattern).
+
+    So, unlike a real block (BlockingBackoffMiddleware), this isn't
+    about slowing down — slowing down doesn't change which node you
+    land on — and backing off the whole domain over it (what we tried
+    first) stalls every other in-flight request behind one unlucky
+    connection for no reason. The fix is just to get off the bad
+    connection: Twisted's HTTP connection pool otherwise happily reuses
+    it (and keeps 404ing) since the error response itself doesn't say
+    Connection: close. A handful of quick retries, each discarding the
+    bad connection via our own Connection: close, is usually enough —
+    at roughly a coin-flip chance of landing on a working node, 4
+    retries gets well above 90% odds of recovering.
+
+    A servlet where every backend node is broken (lm10's detail
+    servlet, as far as we've seen) will still exhaust these retries and
+    fail — no client-side fix can route around that — but at least it
+    fails fast with the real cause in the log, instead of being read as
+    a sustained block.
+
+    Retries are spaced out by RETRY_DELAY rather than fired back to
+    back: the same two srNums exhausted all 4 retries, back to back in
+    under 10 seconds, across several separate pipeline runs — far more
+    consistently than independent ~50% coin flips would predict.
+    Manually probing those same srNums with a couple of real seconds
+    between each fresh connection found them succeeding at a normal
+    rate, like any other srNum. The likely explanation is that the load
+    balancer's node choice isn't fully independent of request timing
+    (e.g. tied to source port or a short rotation window), so a tight
+    burst of retries can end up correlated onto the same bad node in a
+    way that naturally-spaced requests aren't.
+    """
+
+    SIGNATURE = b"has not been defined"
+    MAX_RETRIES = 4
+    RETRY_DELAY = 2.0
+
+    def __init__(self, crawler, call_later=None):
+        self.crawler = crawler
+        self._call_later = call_later or self._reactor_call_later
+
+    @staticmethod
+    def _reactor_call_later(delay, callback):
+        from twisted.internet import reactor
+
+        reactor.callLater(delay, callback)
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls(crawler)
+
+    def process_response(self, request, response, spider=None):
+        if spider is None:
+            spider = self.crawler.spider
+
+        if response.status != 404 or self.SIGNATURE not in response.body:
+            return response
+
+        retry = get_retry_request(
+            request,
+            spider=spider,
+            reason="bad backend node (SRVE0255E)",
+            max_retry_times=self.MAX_RETRIES,
+            stats_base_key="sticky_bad_node",
+        )
+        if retry is None:
+            logger.error(
+                "%s still 404ing a bad backend node after %d retries; "
+                "giving up on %s",
+                request.url,
+                self.MAX_RETRIES,
+                request.body,
+            )
+            return response
+
+        logger.warning(
+            "HTTP 404 from %s (body=%r) looks like a bad backend node, "
+            "not a real not-found; retrying on a fresh connection in %.0fs",
+            request.url,
+            request.body,
+            self.RETRY_DELAY,
+        )
+        retry.headers["Connection"] = "close"
+        deferred = Deferred()
+        self._call_later(self.RETRY_DELAY, lambda: deferred.callback(retry))
+        return deferred
 
 
 class BlockingBackoffMiddleware:
